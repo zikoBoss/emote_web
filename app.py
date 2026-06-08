@@ -1,20 +1,22 @@
-import asyncio
-import json
 import os
-import aiohttp
-from aiohttp import web
-from collections import defaultdict
 import time
+import requests
+from collections import defaultdict
+from flask import Flask, request, jsonify, render_template_string
+
+app = Flask(__name__)
 
 API_BASE = os.environ.get("API_BASE")
 API_KEY = os.environ.get("API_KEY")
 IMAGE_BASE = os.environ.get("IMAGE_BASE")
 DATA_URL = os.environ.get("DATA_URL")
-PORT = int(os.environ.get("PORT"))
+
+if not API_BASE or not API_KEY or not IMAGE_BASE or not DATA_URL:
+    raise ValueError("Missing required environment variables: API_BASE, API_KEY, IMAGE_BASE, DATA_URL")
 
 request_history = defaultdict(list)
 
-HTML_PAGE = """
+HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -237,63 +239,54 @@ HTML_PAGE = """
 </html>
 """
 
-async def rate_limit(request):
-    ip = request.remote or "unknown"
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/dance')
+def proxy_dance():
+    ip = request.remote_addr
     now = time.time()
     request_history[ip] = [t for t in request_history[ip] if now - t < 30]
     if len(request_history[ip]) >= 15:
-        return web.Response(status=429, text="Too many requests")
+        return jsonify({"success": False, "message": "Too many requests"}), 429
     request_history[ip].append(now)
-    return None
 
-async def proxy_dance(request):
-    limited = await rate_limit(request)
-    if limited:
-        return limited
-    params = request.query
-    if not params.get("emote_id") or not params.get("team_code") or not params.get("uids"):
-        return web.json_response({"success": False, "message": "Missing parameters"}, status=400)
-    target = f"{API_BASE}/dance?emote_id={params['emote_id']}&team_code={params['team_code']}&uids={params['uids']}&api_key={API_KEY}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(target) as resp:
-            data = await resp.json()
-            return web.json_response(data)
+    emote_id = request.args.get('emote_id')
+    team_code = request.args.get('team_code')
+    uids = request.args.get('uids')
+    if not emote_id or not team_code or not uids:
+        return jsonify({"success": False, "message": "Missing parameters"}), 400
 
-async def proxy_data(request):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(DATA_URL) as resp:
-            if resp.status != 200:
-                return web.json_response([], status=500)
-            data = await resp.json()
-            return web.json_response(data)
+    target = f"{API_BASE}/dance?emote_id={emote_id}&team_code={team_code}&uids={uids}&api_key={API_KEY}"
+    try:
+        resp = requests.get(target, timeout=10)
+        data = resp.json()
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
-async def proxy_image(request):
-    image_id = request.match_info.get("id")
-    if not image_id:
-        return web.Response(status=404)
+@app.route('/api/data')
+def proxy_data():
+    try:
+        resp = requests.get(DATA_URL, timeout=10)
+        if resp.status_code != 200:
+            return jsonify([]), 500
+        return jsonify(resp.json())
+    except Exception:
+        return jsonify([]), 500
+
+@app.route('/api/image/<image_id>')
+def proxy_image(image_id):
     url = f"{IMAGE_BASE}/{image_id}.png"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                return web.Response(status=404)
-            body = await resp.read()
-            return web.Response(body=body, content_type="image/png")
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            return "", 404
+        return resp.content, 200, {'Content-Type': 'image/png'}
+    except Exception:
+        return "", 404
 
-async def index(request):
-    return web.Response(text=HTML_PAGE, content_type="text/html")
-
-async def main():
-    app = web.Application()
-    app.router.add_get("/", index)
-    app.router.add_get("/api/dance", proxy_dance)
-    app.router.add_get("/api/data", proxy_data)
-    app.router.add_get("/api/image/{id}", proxy_image)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    print(f"Server running on port {PORT}")
-    await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port, debug=False)
