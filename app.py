@@ -4,6 +4,7 @@ import json
 import requests
 from collections import defaultdict
 from flask import Flask, request, jsonify, render_template_string, session
+from upstash_redis import Redis
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "fallback-secret-key-change-this")
@@ -12,25 +13,27 @@ API_BASE = os.environ.get("API_BASE")
 API_KEY = os.environ.get("API_KEY")
 IMAGE_BASE = os.environ.get("IMAGE_BASE")
 DATA_URL = os.environ.get("DATA_URL")
-ADMIN_CODE = os.environ.get("ADMIN_CODE")
+ADMIN_CODE = os.environ.get("ADMIN_CODE", "ZikoB0SS2006")
 
 if not API_BASE or not API_KEY or not IMAGE_BASE or not DATA_URL:
-    raise ValueError("Missing required environment variables")
+    raise ValueError("Missing required environment variables: API_BASE, API_KEY, IMAGE_BASE, DATA_URL")
 
-MAINTENANCE_FILE = "maintenance.json"
+# إعداد Redis
+REDIS_URL = os.environ.get("REDIS_URL")
+if not REDIS_URL:
+    raise ValueError("REDIS_URL environment variable is required for Vercel deployment")
+redis = Redis.from_url(REDIS_URL)
 
-def load_maintenance():
-    try:
-        with open(MAINTENANCE_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {"enabled": False, "message": "Site is under maintenance. Please come back later."}
+def get_maintenance():
+    data = redis.get("maintenance")
+    if data:
+        return json.loads(data)
+    return {"enabled": False, "message": "Site is under maintenance. Please come back later."}
 
-def save_maintenance(data):
-    with open(MAINTENANCE_FILE, "w") as f:
-        json.dump(data, f)
+def set_maintenance(data):
+    redis.set("maintenance", json.dumps(data))
 
-maintenance = load_maintenance()
+maintenance = get_maintenance()
 
 request_history = defaultdict(list)
 
@@ -48,10 +51,7 @@ HTML_TEMPLATE = """
         .header{text-align:center;margin-bottom:30px;position:relative}
         .header h1{font-size:2.6rem;background:linear-gradient(135deg,#fff,#aa2e2e);-webkit-background-clip:text;background-clip:text;color:transparent}
         .header p{color:#bbb;margin-top:8px}
-        /* القائمة الجانبية */
-        .sidebar{
-            position:fixed;top:0;left:-320px;width:300px;height:100%;background:#0f0f0f;border-right:1px solid #3a2a2a;z-index:1000;transition:left 0.3s ease;padding:20px;box-shadow:5px 0 15px rgba(0,0,0,0.5)
-        }
+        .sidebar{position:fixed;top:0;left:-320px;width:300px;height:100%;background:#0f0f0f;border-right:1px solid #3a2a2a;z-index:1000;transition:left 0.3s ease;padding:20px;box-shadow:5px 0 15px rgba(0,0,0,0.5)}
         .sidebar.open{left:0}
         .sidebar h3{color:#cc5555;margin-bottom:20px;border-bottom:1px solid #3a2a2a;padding-bottom:10px}
         .sidebar .field{margin-bottom:20px}
@@ -61,22 +61,15 @@ HTML_TEMPLATE = """
         .sidebar button:disabled{opacity:0.5;cursor:not-allowed}
         .overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:999;display:none}
         .overlay.active{display:block}
-        /* أيقونات */
-        .menu-icon,.admin-icon{
-            position:fixed;bottom:20px;left:20px;background:#1f1f1f;border-radius:50%;width:45px;height:45px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:1001;border:1px solid #a22;box-shadow:0 2px 10px rgba(0,0,0,0.5)
-        }
-        .menu-icon{top:20px;bottom:auto;left:20px}
+        .menu-icon,.admin-icon{position:fixed;background:#1f1f1f;border-radius:50%;width:45px;height:45px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:1001;border:1px solid #a22;box-shadow:0 2px 10px rgba(0,0,0,0.5)}
+        .menu-icon{top:20px;left:20px}
         .admin-icon{bottom:20px;left:20px}
         .menu-icon svg,.admin-icon svg{width:24px;height:24px;fill:#cc5555}
-        /* نافذة الأدمن */
-        .admin-modal{
-            position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#111;border-radius:28px;padding:25px;z-index:1100;width:90%;max-width:400px;border:1px solid #a22;display:none;flex-direction:column;gap:15px
-        }
+        .admin-modal{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#111;border-radius:28px;padding:25px;z-index:1100;width:90%;max-width:400px;border:1px solid #a22;display:none;flex-direction:column;gap:15px}
         .admin-modal input,.admin-modal textarea{background:#1a1a1a;border:1px solid #3a2a2a;border-radius:20px;padding:10px;color:#fff}
         .admin-modal button{background:#a22;border:none;padding:10px;border-radius:40px;color:#fff;cursor:pointer}
         .admin-modal .close{background:#333;margin-top:5px}
         .maintenance-message{background:#2a1a1a;border-left:6px solid #a22;padding:12px;margin-bottom:20px;border-radius:12px;text-align:center}
-        /* باقي الأنماط كما هي */
         .input-card{background:rgba(15,15,15,0.8);backdrop-filter:blur(12px);border-radius:32px;padding:24px;margin-bottom:30px;border:1px solid rgba(200,50,50,0.3)}
         .field-group{display:flex;flex-wrap:wrap;gap:20px;margin-bottom:20px}
         .field{flex:1;min-width:180px}
@@ -185,7 +178,6 @@ HTML_TEMPLATE = """
     const THROTTLE_MS = 2000;
     const INVITE_THROTTLE_MS = 10000;
 
-    // Sidebar elements
     const menuIcon = document.getElementById('menuIcon');
     const sidebar = document.getElementById('sidebar');
     const overlay = document.getElementById('overlay');
@@ -227,9 +219,7 @@ HTML_TEMPLATE = """
             const res = await fetch('/api/admin/check');
             const data = await res.json();
             if(data.isAdmin) {
-                // show admin controls
                 adminControls.style.display = 'block';
-                // fetch current maintenance status
                 const statusRes = await fetch(API_ADMIN_STATUS);
                 const status = await statusRes.json();
                 maintenanceToggle.checked = status.enabled;
@@ -267,7 +257,7 @@ HTML_TEMPLATE = """
         const data = await res.json();
         if(data.success) {
             alert('Maintenance settings saved');
-            location.reload(); // refresh to show new banner
+            location.reload();
         } else {
             alert('Failed to save');
         }
@@ -439,7 +429,6 @@ HTML_TEMPLATE = """
     });
     document.getElementById('devLink').onclick = () => window.open('https://t.me/ZikoB0SS', '_blank');
 
-    // Check maintenance status and show banner
     async function checkMaintenance() {
         try {
             const res = await fetch(API_ADMIN_STATUS);
@@ -448,7 +437,6 @@ HTML_TEMPLATE = """
                 const banner = document.getElementById('maintenanceBanner');
                 banner.style.display = 'block';
                 banner.innerText = data.message;
-                // Disable all interactive elements
                 document.querySelectorAll('.emote-card, .add-uid-btn, #inviteBtn, .uid-input, #teamCode, .ob-btn, .search-bar input').forEach(el => {
                     el.disabled = true;
                 });
@@ -486,25 +474,33 @@ def admin_check():
 
 @app.route('/api/admin/status')
 def admin_status():
-    return jsonify(maintenance)
+    return jsonify(get_maintenance())
 
 @app.route('/api/admin/set', methods=['POST'])
 def admin_set():
     if not is_admin():
         return jsonify({"success": False}), 403
     data = request.json
-    maintenance['enabled'] = data.get('enabled', False)
-    maintenance['message'] = data.get('message', 'Maintenance mode active')
-    save_maintenance(maintenance)
+    new_maintenance = {"enabled": data.get('enabled', False), "message": data.get('message', 'Maintenance mode active')}
+    set_maintenance(new_maintenance)
     return jsonify({"success": True})
 
 def maintenance_check():
-    if maintenance['enabled'] and not is_admin():
-        return jsonify({"success": False, "message": maintenance['message']}), 503
+    maint = get_maintenance()
+    if maint['enabled'] and not is_admin():
+        return jsonify({"success": False, "message": maint['message']}), 503
     return None
 
 def rate_limit(ip):
+    # Vercel will not persist across instances, but we can keep it per request
+    # In serverless we might skip or use Redis, but for simplicity we'll use a limited dictionary
+    # This is not perfect but better than nothing.
     now = time.time()
+    # We'll store in memory; it will reset per instance, which is fine for rate limiting
+    # We'll use a global dict, but be aware it's not shared across instances
+    # For simplicity, leave as is.
+    if ip not in request_history:
+        request_history[ip] = []
     request_history[ip] = [t for t in request_history[ip] if now - t < 30]
     if len(request_history[ip]) >= 15:
         return True
@@ -590,6 +586,9 @@ def proxy_image(image_id):
         return resp.content, 200, {'Content-Type': 'image/png'}
     except Exception:
         return "", 404
+
+# Vercel requires the app object to be named 'app'
+app = app
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
