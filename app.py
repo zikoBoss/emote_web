@@ -13,7 +13,7 @@ API_BASE = os.environ.get("API_BASE")
 API_KEY = os.environ.get("API_KEY")
 IMAGE_BASE = os.environ.get("IMAGE_BASE")
 DATA_URL = os.environ.get("DATA_URL")
-ADMIN_CODE = os.environ.get("ADMIN_CODE", "ZikoB0SS2006")
+ADMIN_CODE = os.environ.get("ADMIN_CODE")
 
 if not API_BASE or not API_KEY or not IMAGE_BASE or not DATA_URL:
     raise ValueError("Missing required environment variables: API_BASE, API_KEY, IMAGE_BASE, DATA_URL")
